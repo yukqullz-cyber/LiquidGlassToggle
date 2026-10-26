@@ -295,6 +295,10 @@ static void LGDump(UIView *v, UIWindow *w, int d, NSMutableString *out) {
 }
 %end
 
+// Logos declara las clases desconocidas como NSObject; hay que decirle que es una UITableView.
+@interface AWENewFeedTableView : UITableView
+@end
+
 %hook AWENewFeedTableView
 - (void)setFrame:(CGRect)f {
     if (LGEnabled() && self.superview) {
