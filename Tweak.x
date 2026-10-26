@@ -1,10 +1,19 @@
-// LiquidGlassToggle - botón flotante que activa/desactiva Liquid Glass (iOS 26+)
-// Aplica el efecto SOLO a: la barra inferior y al propio botón.
+// LiquidGlassToggle v2 - botón flotante que activa/desactiva Liquid Glass (iOS 26+)
+// Toque corto: activar/desactivar. Pulsación larga: copia el mapa de vistas (diagnóstico).
 #import <UIKit/UIKit.h>
 
 static NSString *const kLGKey = @"LGToggleEnabled";
 static NSInteger const kLGGlassTag = 0x4C47;
 static NSInteger const kLGButtonTag = 0x4C48;
+
+@interface LGHandler : NSObject <UIGestureRecognizerDelegate>
++ (instancetype)shared;
+- (void)toggle:(UIButton *)sender;
+- (void)drag:(UIPanGestureRecognizer *)pan;
+- (void)press:(UILongPressGestureRecognizer *)gr;
+- (void)dump:(UILongPressGestureRecognizer *)gr;
+- (void)install;
+@end
 
 static BOOL LGEnabled(void) {
     return [[NSUserDefaults standardUserDefaults] boolForKey:kLGKey];
@@ -19,15 +28,38 @@ static UIVisualEffectView *LGMakeGlass(void) {
     UIVisualEffectView *v = [[UIVisualEffectView alloc] initWithEffect:effect];
     v.tag = kLGGlassTag;
     v.userInteractionEnabled = NO;
-    v.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
     return v;
+}
+
+// Recoge el área que ocupan los botones reales de la barra (para no cubrir espacio vacío).
+static void LGCollect(UIView *v, UIView *host, CGRect *u) {
+    for (UIView *s in v.subviews) {
+        if (s.tag == kLGGlassTag) continue;
+        NSString *n = NSStringFromClass(s.class).lowercaseString;
+        if (!s.hidden && s.alpha > 0.05 && [n containsString:@"tabbar"] && [n containsString:@"button"]) {
+            *u = CGRectUnion(*u, [s convertRect:s.bounds toView:host]);
+        } else {
+            LGCollect(s, host, u);
+        }
+    }
+}
+
+static CGRect LGGlassFrame(UIView *host) {
+    CGRect u = CGRectNull;
+    LGCollect(host, host, &u);
+    if (CGRectIsNull(u) || u.size.width < 100) return CGRectInset(host.bounds, 12, 4);
+    return CGRectIntersection(CGRectInset(u, -16, -10), host.bounds);
 }
 
 static void LGApply(UIView *host) {
     UIView *old = [host viewWithTag:kLGGlassTag];
     if (LGEnabled()) {
-        CGRect r = CGRectInset(host.bounds, 12, 4);
-        if (old) { old.frame = r; return; }
+        CGRect r = LGGlassFrame(host);
+        if (old) {
+            old.frame = r;
+            old.layer.cornerRadius = MIN(r.size.height / 2.0, 32);
+            return;
+        }
         UIVisualEffectView *g = LGMakeGlass();
         if (!g) return;
         g.frame = r;
@@ -35,8 +67,24 @@ static void LGApply(UIView *host) {
         g.layer.cornerRadius = MIN(r.size.height / 2.0, 32);
         [host insertSubview:g atIndex:0];
         host.backgroundColor = UIColor.clearColor;
+
+        // Interactividad: el cristal "se hunde" al tocar la barra
+        BOOL has = NO;
+        for (UIGestureRecognizer *gr in host.gestureRecognizers) if ([gr.name isEqualToString:@"LGPress"]) has = YES;
+        if (!has) {
+            UILongPressGestureRecognizer *gr = [[UILongPressGestureRecognizer alloc]
+                initWithTarget:[LGHandler shared] action:@selector(press:)];
+            gr.minimumPressDuration = 0;
+            gr.cancelsTouchesInView = NO;
+            gr.delaysTouchesBegan = NO;
+            gr.delegate = [LGHandler shared];
+            gr.name = @"LGPress";
+            [host addGestureRecognizer:gr];
+        }
     } else {
         [old removeFromSuperview];
+        for (UIGestureRecognizer *gr in [host.gestureRecognizers copy])
+            if ([gr.name isEqualToString:@"LGPress"]) [host removeGestureRecognizer:gr];
     }
 }
 
@@ -75,15 +123,33 @@ static UIWindow *LGKeyWindow(void) {
     return nil;
 }
 
-@interface LGHandler : NSObject
-+ (void)toggle:(UIButton *)sender;
-+ (void)drag:(UIPanGestureRecognizer *)pan;
-+ (void)install;
-@end
+// Diagnóstico: vistas grandes o cercanas al borde inferior (para localizar el video y la barra).
+static void LGDump(UIView *v, UIWindow *w, int d, NSMutableString *out) {
+    if (d > 16 || out.length > 24000) return;
+    CGRect r = [v convertRect:v.bounds toView:w];
+    BOOL big = r.size.width >= w.bounds.size.width * 0.9 && r.size.height >= w.bounds.size.height * 0.4;
+    BOOL low = CGRectGetMaxY(r) > w.bounds.size.height * 0.8 && r.size.width > 30 && r.size.height > 30;
+    if (big || low) {
+        [out appendFormat:@"%@%@ x=%.0f y=%.0f w=%.0f h=%.0f\n",
+         [@"" stringByPaddingToLength:d * 2 withString:@" " startingAtIndex:0],
+         NSStringFromClass(v.class), r.origin.x, r.origin.y, r.size.width, r.size.height];
+    }
+    for (UIView *s in v.subviews) LGDump(s, w, d + 1, out);
+}
 
 @implementation LGHandler
 
-+ (void)toggle:(UIButton *)sender {
++ (instancetype)shared {
+    static LGHandler *h; static dispatch_once_t t;
+    dispatch_once(&t, ^{ h = [LGHandler new]; });
+    return h;
+}
+
+- (BOOL)gestureRecognizer:(UIGestureRecognizer *)a shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)b {
+    return YES;
+}
+
+- (void)toggle:(UIButton *)sender {
     BOOL on = !LGEnabled();
     [[NSUserDefaults standardUserDefaults] setBool:on forKey:kLGKey];
     sender.tintColor = on ? UIColor.systemBlueColor : UIColor.whiteColor;
@@ -92,14 +158,39 @@ static UIWindow *LGKeyWindow(void) {
     [[UIImpactFeedbackGenerator new] impactOccurred];
 }
 
-+ (void)drag:(UIPanGestureRecognizer *)pan {
+- (void)press:(UILongPressGestureRecognizer *)gr {
+    UIView *g = [gr.view viewWithTag:kLGGlassTag];
+    if (!g) return;
+    BOOL down = (gr.state == UIGestureRecognizerStateBegan || gr.state == UIGestureRecognizerStateChanged);
+    [UIView animateWithDuration:0.45 delay:0 usingSpringWithDamping:0.55 initialSpringVelocity:0.8
+                        options:UIViewAnimationOptionAllowUserInteraction | UIViewAnimationOptionBeginFromCurrentState
+                     animations:^{ g.transform = down ? CGAffineTransformMakeScale(1.07, 1.12) : CGAffineTransformIdentity; }
+                     completion:nil];
+}
+
+- (void)drag:(UIPanGestureRecognizer *)pan {
     UIView *v = pan.view;
     CGPoint t = [pan translationInView:v.superview];
     v.center = CGPointMake(v.center.x + t.x, v.center.y + t.y);
     [pan setTranslation:CGPointZero inView:v.superview];
 }
 
-+ (void)install {
+- (void)dump:(UILongPressGestureRecognizer *)gr {
+    if (gr.state != UIGestureRecognizerStateBegan) return;
+    UIWindow *w = LGKeyWindow();
+    if (!w) return;
+    NSMutableString *out = [NSMutableString stringWithFormat:@"screen %.0fx%.0f\n", w.bounds.size.width, w.bounds.size.height];
+    LGDump(w, w, 0, out);
+    [UIPasteboard generalPasteboard].string = out;
+    UIViewController *top = w.rootViewController;
+    while (top.presentedViewController) top = top.presentedViewController;
+    UIAlertController *a = [UIAlertController alertControllerWithTitle:@"Copiado"
+        message:@"Mapa de vistas copiado. Pégalo en el chat." preferredStyle:UIAlertControllerStyleAlert];
+    [a addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+    [top presentViewController:a animated:YES completion:nil];
+}
+
+- (void)install {
     UIWindow *w = LGKeyWindow();
     if (!w || [w viewWithTag:kLGButtonTag]) return;
 
@@ -111,7 +202,6 @@ static UIWindow *LGKeyWindow(void) {
     [b setImage:[UIImage systemImageNamed:@"sparkles"] forState:UIControlStateNormal];
     b.tintColor = LGEnabled() ? UIColor.systemBlueColor : UIColor.whiteColor;
 
-    // Fondo del botón: Liquid Glass en iOS 26, blur normal en versiones anteriores
     UIVisualEffectView *bg = LGMakeGlass();
     if (!bg) bg = [[UIVisualEffectView alloc] initWithEffect:
                    [UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemThinMaterialDark]];
@@ -121,6 +211,9 @@ static UIWindow *LGKeyWindow(void) {
 
     [b addTarget:self action:@selector(toggle:) forControlEvents:UIControlEventTouchUpInside];
     [b addGestureRecognizer:[[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(drag:)]];
+    UILongPressGestureRecognizer *lp = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(dump:)];
+    lp.minimumPressDuration = 0.8;
+    [b addGestureRecognizer:lp];
     [w addSubview:b];
 
     [NSTimer scheduledTimerWithTimeInterval:1.0 repeats:YES block:^(__unused NSTimer *t) {
@@ -131,8 +224,6 @@ static UIWindow *LGKeyWindow(void) {
 
 @end
 
-// Liquid Glass solo en la barra inferior.
-// Si la app usa una barra personalizada, añade aquí su clase (ver README).
 %hook UITabBar
 - (void)layoutSubviews {
     %orig;
@@ -146,6 +237,6 @@ static UIWindow *LGKeyWindow(void) {
                     object:nil queue:NSOperationQueue.mainQueue
                 usingBlock:^(__unused NSNotification *n) {
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)),
-                       dispatch_get_main_queue(), ^{ [LGHandler install]; });
+                       dispatch_get_main_queue(), ^{ [[LGHandler shared] install]; });
     }];
 }
