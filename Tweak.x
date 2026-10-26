@@ -26,14 +26,39 @@ static UIVisualEffectView *LGMakeGlass(void) {
 static void LGApply(UIView *host) {
     UIView *old = [host viewWithTag:kLGGlassTag];
     if (LGEnabled()) {
-        if (old) { old.frame = host.bounds; return; }
+        CGRect r = CGRectInset(host.bounds, 12, 4);
+        if (old) { old.frame = r; return; }
         UIVisualEffectView *g = LGMakeGlass();
         if (!g) return;
-        g.frame = host.bounds;
+        g.frame = r;
+        g.clipsToBounds = YES;
+        g.layer.cornerRadius = MIN(r.size.height / 2.0, 32);
         [host insertSubview:g atIndex:0];
+        host.backgroundColor = UIColor.clearColor;
     } else {
         [old removeFromSuperview];
     }
+}
+
+// Detecta la barra inferior de TikTok (clase propia) por nombre y posición.
+static BOOL LGLooksLikeTabBar(UIView *v, UIWindow *w) {
+    NSString *n = NSStringFromClass(v.class).lowercaseString;
+    if (![n containsString:@"tabbar"]) return NO;
+    for (NSString *bad in @[@"button", @"item", @"cell", @"model", @"controller", @"bubble",
+                            @"delegate", @"sliding", @"category", @"anchor", @"sticker",
+                            @"filter", @"lynx", @"config", @"protocol"]) {
+        if ([n containsString:bad]) return NO;
+    }
+    CGRect r = [v convertRect:v.bounds toView:w];
+    return r.size.width >= w.bounds.size.width * 0.8 &&
+           r.size.height >= 40 && r.size.height <= 140 &&
+           CGRectGetMaxY(r) >= w.bounds.size.height * 0.9;
+}
+
+static void LGSweep(UIView *v, UIWindow *w) {
+    if (v.tag == kLGGlassTag || v.tag == kLGButtonTag) return;
+    if (![v isKindOfClass:[UITabBar class]] && LGLooksLikeTabBar(v, w)) LGApply(v);
+    for (UIView *s in [v.subviews copy]) LGSweep(s, w);
 }
 
 static void LGRefreshTree(UIView *v) {
@@ -63,7 +88,7 @@ static UIWindow *LGKeyWindow(void) {
     [[NSUserDefaults standardUserDefaults] setBool:on forKey:kLGKey];
     sender.tintColor = on ? UIColor.systemBlueColor : UIColor.whiteColor;
     UIWindow *w = LGKeyWindow();
-    if (w) LGRefreshTree(w);
+    if (w) { LGRefreshTree(w); LGSweep(w, w); }
     [[UIImpactFeedbackGenerator new] impactOccurred];
 }
 
@@ -97,6 +122,11 @@ static UIWindow *LGKeyWindow(void) {
     [b addTarget:self action:@selector(toggle:) forControlEvents:UIControlEventTouchUpInside];
     [b addGestureRecognizer:[[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(drag:)]];
     [w addSubview:b];
+
+    [NSTimer scheduledTimerWithTimeInterval:1.0 repeats:YES block:^(__unused NSTimer *t) {
+        UIWindow *kw = LGKeyWindow();
+        if (kw) LGSweep(kw, kw);
+    }];
 }
 
 @end
