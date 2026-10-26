@@ -1,6 +1,7 @@
 // LiquidGlassToggle v2 - botón flotante que activa/desactiva Liquid Glass (iOS 26+)
 // Toque corto: activar/desactivar. Pulsación larga: copia el mapa de vistas (diagnóstico).
 #import <UIKit/UIKit.h>
+#import <objc/runtime.h>
 
 static NSString *const kLGKey = @"LGToggleEnabled";
 static NSInteger const kLGGlassTag = 0x4C47;
@@ -109,6 +110,63 @@ static void LGSweep(UIView *v, UIWindow *w) {
     for (UIView *s in [v.subviews copy]) LGSweep(s, w);
 }
 
+
+// ---------- Modo nativo: usa el Liquid Glass real que ya trae TikTok ----------
+static BOOL gNative = NO;
+static char kOrigKey, kOrigH;
+
+static void LGForce(UIView *v, CGFloat alpha, BOOL hide) {
+    NSDictionary *o = objc_getAssociatedObject(v, &kOrigKey);
+    if (LGEnabled()) {
+        if (!o) objc_setAssociatedObject(v, &kOrigKey, @{@"a": @(v.alpha), @"h": @(v.hidden)}, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        v.alpha = alpha; v.hidden = hide;
+    } else if (o) {
+        v.alpha = [o[@"a"] doubleValue]; v.hidden = [o[@"h"] boolValue];
+        objc_setAssociatedObject(v, &kOrigKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+}
+
+static BOOL LGFind(UIView *v, NSString *cls) {
+    if ([NSStringFromClass(v.class) isEqualToString:cls]) return YES;
+    for (UIView *s in v.subviews) if (LGFind(s, cls)) return YES;
+    return NO;
+}
+
+// Muestra la barra de cristal del sistema y quita los fondos negros que la tapan.
+static void LGNative(UIView *v) {
+    NSString *n = NSStringFromClass(v.class);
+    if ([n isEqualToString:@"TTKFakeTabBar"] || [n isEqualToString:@"_UIBottomTabBarGroupView"] ||
+        [n isEqualToString:@"_UITabContainerView"]) {
+        LGForce(v, 1.0, NO);
+    } else if ([n containsString:@"TabBarBackgroundView"] || [n isEqualToString:@"TTKTabBarBlurView"] ||
+               [n isEqualToString:@"TTKFeedDescBottomMaskView"]) {
+        LGForce(v, 0.0, YES);
+        return;
+    }
+    for (UIView *s in [v.subviews copy]) LGNative(s);
+}
+
+// Estira el video hasta el borde inferior para que el cristal tenga algo que refractar.
+static void LGFeed(UIView *v) {
+    if ([NSStringFromClass(v.class) isEqualToString:@"AWENewFeedTableView"] && v.superview) {
+        CGFloat H = v.superview.bounds.size.height;
+        NSNumber *orig = objc_getAssociatedObject(v, &kOrigH);
+        CGRect f = v.frame;
+        if (LGEnabled() && f.size.height < H && f.size.height > H * 0.8) {
+            if (!orig) objc_setAssociatedObject(v, &kOrigH, @(f.size.height), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            f.size.height = H; v.frame = f;
+        } else if (!LGEnabled() && orig) {
+            f.size.height = orig.doubleValue; v.frame = f;
+            objc_setAssociatedObject(v, &kOrigH, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        } else return;
+        if ([v isKindOfClass:[UITableView class]]) { [(UITableView *)v beginUpdates]; [(UITableView *)v endUpdates]; }
+        return;
+    }
+    for (UIView *s in [v.subviews copy]) LGFeed(s);
+}
+
+static void LGSweepAll(UIWindow *w);
+
 static void LGRefreshTree(UIView *v) {
     if ([v isKindOfClass:[UITabBar class]]) [v setNeedsLayout];
     for (UIView *s in v.subviews) LGRefreshTree(s);
@@ -123,16 +181,22 @@ static UIWindow *LGKeyWindow(void) {
     return nil;
 }
 
+static void LGSweepAll(UIWindow *w) {
+    gNative = LGFind(w, @"TTKFakeTabBar");
+    LGFeed(w);
+    if (gNative) LGNative(w); else LGSweep(w, w);
+}
+
 // Diagnóstico: vistas grandes o cercanas al borde inferior (para localizar el video y la barra).
 static void LGDump(UIView *v, UIWindow *w, int d, NSMutableString *out) {
-    if (d > 16 || out.length > 24000) return;
+    if (d > 45 || out.length > 30000) return;
     CGRect r = [v convertRect:v.bounds toView:w];
     BOOL big = r.size.width >= w.bounds.size.width * 0.9 && r.size.height >= w.bounds.size.height * 0.4;
     BOOL low = CGRectGetMaxY(r) > w.bounds.size.height * 0.8 && r.size.width > 30 && r.size.height > 30;
     if (big || low) {
-        [out appendFormat:@"%@%@ x=%.0f y=%.0f w=%.0f h=%.0f\n",
+        [out appendFormat:@"%@%@ x=%.0f y=%.0f w=%.0f h=%.0f a=%.1f%@\n",
          [@"" stringByPaddingToLength:d * 2 withString:@" " startingAtIndex:0],
-         NSStringFromClass(v.class), r.origin.x, r.origin.y, r.size.width, r.size.height];
+         NSStringFromClass(v.class), r.origin.x, r.origin.y, r.size.width, r.size.height, v.alpha, v.hidden ? @" HIDDEN" : @""];
     }
     for (UIView *s in v.subviews) LGDump(s, w, d + 1, out);
 }
@@ -154,7 +218,7 @@ static void LGDump(UIView *v, UIWindow *w, int d, NSMutableString *out) {
     [[NSUserDefaults standardUserDefaults] setBool:on forKey:kLGKey];
     sender.tintColor = on ? UIColor.systemBlueColor : UIColor.whiteColor;
     UIWindow *w = LGKeyWindow();
-    if (w) { LGRefreshTree(w); LGSweep(w, w); }
+    if (w) { LGRefreshTree(w); LGSweepAll(w); }
     [[UIImpactFeedbackGenerator new] impactOccurred];
 }
 
@@ -218,7 +282,7 @@ static void LGDump(UIView *v, UIWindow *w, int d, NSMutableString *out) {
 
     [NSTimer scheduledTimerWithTimeInterval:1.0 repeats:YES block:^(__unused NSTimer *t) {
         UIWindow *kw = LGKeyWindow();
-        if (kw) LGSweep(kw, kw);
+        if (kw) LGSweepAll(kw);
     }];
 }
 
@@ -227,7 +291,17 @@ static void LGDump(UIView *v, UIWindow *w, int d, NSMutableString *out) {
 %hook UITabBar
 - (void)layoutSubviews {
     %orig;
-    LGApply(self);
+    if (!gNative && ![NSStringFromClass(self.class) hasPrefix:@"TTK"]) LGApply(self);
+}
+%end
+
+%hook AWENewFeedTableView
+- (void)setFrame:(CGRect)f {
+    if (LGEnabled() && self.superview) {
+        CGFloat H = self.superview.bounds.size.height;
+        if (f.size.height < H && f.size.height > H * 0.8) f.size.height = H;
+    }
+    %orig(f);
 }
 %end
 
